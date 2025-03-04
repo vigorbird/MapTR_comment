@@ -529,6 +529,7 @@ def get_2d_boxes(nusc,
             min_x, min_y, max_x, max_y = final_coords
 
         # Generate dictionary record to be included in the .json file.
+        #整个代码就这里使用了generate_record函数
         repro_rec = generate_record(ann_rec, min_x, min_y, max_x, max_y,
                                     sample_data_token, sd_rec['filename'])
 

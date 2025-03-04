@@ -29,10 +29,10 @@ sys.path.append('.')
 
 
 
-
+#CNuScenesMapExplorer类继承自父类 NuScenesMapExplorer
 class CNuScenesMapExplorer(NuScenesMapExplorer):
     def __ini__(self, *args, **kwargs):
-        super(self, CNuScenesMapExplorer).__init__(*args, **kwargs)
+        super(self, CNuScenesMapExplorer).__init__(*args, **kwargs)#调用父类构造函数
 
     def _get_centerline(self,
                            patch_box: Tuple[float, float, float, float],
@@ -133,7 +133,7 @@ def get_available_scenes(nusc):
         has_more_frames = True
         scene_not_exist = False
         while has_more_frames:
-            lidar_path, boxes, _ = nusc.get_sample_data(sd_rec['token'])
+            lidar_path, boxes, _ = nusc.get_sample_data(sd_rec['token'])#nuscenes数据集 api
             lidar_path = str(lidar_path)
             if os.getcwd() in lidar_path:
                 # path from lyftdataset is absolute path
@@ -756,7 +756,7 @@ class VectorizedLocalMap(object):
 def create_nuscenes_infos(root_path,
                           out_path,
                           can_bus_root_path,
-                          info_prefix,
+                          info_prefix,# = nuscenes
                           version='v1.0-trainval',
                           max_sweeps=10):
     """Create info file of nuscene dataset.
@@ -771,26 +771,28 @@ def create_nuscenes_infos(root_path,
         max_sweeps (int): Max number of sweeps.
             Default: 10
     """
+    #1.构建nuscens类
     from nuscenes.nuscenes import NuScenes
     from nuscenes.can_bus.can_bus_api import NuScenesCanBus
-    print(version, root_path)
-    nusc = NuScenes(version=version, dataroot=root_path, verbose=True)
-    nusc_can_bus = NuScenesCanBus(dataroot=can_bus_root_path)
+    print(version, root_path)#打印输出两个变量 version 和 rootpath
+    nusc = NuScenes(version=version, dataroot=root_path, verbose=True)#nuscene数据集 api
+    nusc_can_bus = NuScenesCanBus(dataroot=can_bus_root_path)#nuscene数据集 api
     MAPS = ['boston-seaport', 'singapore-hollandvillage',
-                     'singapore-onenorth', 'singapore-queenstown']
+             'singapore-onenorth', 'singapore-queenstown']
     nusc_maps = {}
     map_explorer = {}
     for loc in MAPS:
-        nusc_maps[loc] = NuScenesMap(dataroot=root_path, map_name=loc)
-        map_explorer[loc] = CNuScenesMapExplorer(nusc_maps[loc])
+        nusc_maps[loc] = NuScenesMap(dataroot=root_path, map_name=loc)# nuscene数据集 api
+        map_explorer[loc] = CNuScenesMapExplorer(nusc_maps[loc])# 作者自己写的类，这个类继承了nuscen数据集的api中的一个类
 
-
+    #导入了nuscene数据集中的split模块， split模块它定义了哪些场景属于训练集、验证集或测试集。
+    #2.从nuscens 的 api中拿到所有nuscen的场景信息
     from nuscenes.utils import splits
     available_vers = ['v1.0-trainval', 'v1.0-test', 'v1.0-mini']
-    assert version in available_vers
+    assert version in available_vers#使用 assert 语句检查用户指定的 version 是否在 available_vers 列表中。
     if version == 'v1.0-trainval':
-        train_scenes = splits.train
-        val_scenes = splits.val
+        train_scenes = splits.train#表示训练集的场景列表
+        val_scenes = splits.val#表示验证集的场景列表。
     elif version == 'v1.0-test':
         train_scenes = splits.test
         val_scenes = []
@@ -801,11 +803,26 @@ def create_nuscenes_infos(root_path,
         raise ValueError('unknown')
 
     # filter existing scenes.
-    available_scenes = get_available_scenes(nusc)
+    #3.从下载的nuscens数据集中提取出哪些数据集可以用
+    available_scenes = get_available_scenes(nusc)#还没有看，但是我觉得不重要，可以不用看具体实现
+
+    #4. 将下载数据集中可用的场景和nuscens规定的场景进行比较，如果重合那么保留
+    #available_scenes是一个包含多个场景的列表，每个场景是一个字典，其中 name 是场景的名称
+    #下面这个代码就是提取出所有可用场景的名称
     available_scene_names = [s['name'] for s in available_scenes]
-    train_scenes = list(
-        filter(lambda x: x in available_scene_names, train_scenes))
+    #fitler接受两个参数，一个函数和一个可迭代对象
+    #它会遍历可迭代对象（这里是 train_scenes），并将每个元素传递给函数
+    #如果函数返回 True，则保留该元素；否则过滤掉。
+    #filter返回的是一个迭代器，通过 list() 将其转换为列表。
+    #下面这两行代码的核心作用是遍历nuscens数据集所有能用的场景数据，判断是否在现有数据集中存在
+    #为什么要这么做是因为担心下载的数据集不完整，如果直接使用train_scenes，后面会报错
+    train_scenes = list(filter(lambda x: x in available_scene_names, train_scenes))
     val_scenes = list(filter(lambda x: x in available_scene_names, val_scenes))
+
+    #5.提取出可以使用的训练场景和评测场景的所有token
+    #index(s) 方法返回场景名称 s 在 available_scene_names 中的索引位置
+    #然后提取出这个场景的token
+    #然后将这些token组成set数据结构
     train_scenes = set([
         available_scenes[available_scene_names.index(s)]['token']
         for s in train_scenes
@@ -815,6 +832,8 @@ def create_nuscenes_infos(root_path,
         for s in val_scenes
     ])
 
+    #判断version变量中是否存在test字符串
+    #判断是要训练数据还是要评测模型
     test = 'test' in version
     if test:
         print('test scene: {}'.format(len(train_scenes)))
@@ -822,6 +841,8 @@ def create_nuscenes_infos(root_path,
         print('train scene: {}, val scene: {}'.format(
             len(train_scenes), len(val_scenes)))
 
+    #6.提取可用的场景，转换成作者自己定义的数据类型！！！！！
+    #非常重要的函数！！！！！
     train_nusc_infos, val_nusc_infos = _fill_trainval_infos(
         nusc, nusc_can_bus, nusc_maps, map_explorer, train_scenes, val_scenes, test, max_sweeps=max_sweeps)
 
@@ -829,28 +850,31 @@ def create_nuscenes_infos(root_path,
     if test:
         print('test sample: {}'.format(len(train_nusc_infos)))
         data = dict(infos=train_nusc_infos, metadata=metadata)
+        #'{}_map_infos_temporal_test.pkl' 是一个字符串模板，其中 {} 是一个占位符。
+        #format(info_prefix) 是字符串的格式化方法，用于将 info_prefix 的值插入到占位符 {} 的位置。
+        #如果是nuscene数据集，那么最终的路径就是nuscene_map_infos_temporal_test.pkl
         info_path = osp.join(out_path,
                              '{}_map_infos_temporal_test.pkl'.format(info_prefix))
-        mmcv.dump(data, info_path)
+        mmcv.dump(data, info_path)#这里使用了外部库mmcv的 api，用于保存数据！！！
     else:
-        print('train sample: {}, val sample: {}'.format(
-            len(train_nusc_infos), len(val_nusc_infos)))
+        print('train sample: {}, val sample: {}'.format(len(train_nusc_infos), len(val_nusc_infos)))
         data = dict(infos=train_nusc_infos, metadata=metadata)
         info_path = osp.join(out_path,
                              '{}_map_infos_temporal_train.pkl'.format(info_prefix))
-        mmcv.dump(data, info_path)
+        mmcv.dump(data, info_path)#保存训练数据！！
+
         data['infos'] = val_nusc_infos
         info_val_path = osp.join(out_path,
                                  '{}_map_infos_temporal_val.pkl'.format(info_prefix))
-        mmcv.dump(data, info_val_path)
+        mmcv.dump(data, info_val_path)#保存评测数据！
 
 
 
 def nuscenes_data_prep(root_path,
                        can_bus_root_path,
-                       info_prefix,
-                       version,
-                       dataset_name,
+                       info_prefix,# = nuscenes
+                       version,# = v1.0-trainval
+                       dataset_name,# = ‘NuScenesDataset’
                        out_dir,
                        max_sweeps=10):
     """Prepare data related to nuScenes dataset.
@@ -917,23 +941,26 @@ parser.add_argument(
     default='./data/kitti',
     required='False',
     help='name of info pkl')
+#用户可以在命令行中通过 --extra-tag 来指定这个参数
+#如果用户没有在命令行中提供 --extra-tag 参数，则默认值为 'nuscenes'
 parser.add_argument('--extra-tag', type=str, default='nuscenes')
-parser.add_argument(
-    '--workers', type=int, default=4, help='number of threads to be used')
-args = parser.parse_args()
+parser.add_argument('--workers', type=int, default=4, help='number of threads to be used')
+args = parser.parse_args()#这行代码解析命令行参数，并将结果存储在 args 对象中。可以通过 args.参数名 的方式访问。
 
 
 if __name__ == '__main__':
+    #1.准备训练的数据
     train_version = f'{args.version}-trainval'
     nuscenes_data_prep(
-        root_path=args.root_path,
-        can_bus_root_path=args.canbus,
+        root_path=args.root_path,#nusecens数据集的根目录
+        can_bus_root_path=args.canbus,#nusecens数据集的根目录
         info_prefix=args.extra_tag,
         version=train_version,
         dataset_name='NuScenesDataset',
         out_dir=args.out_dir,
         max_sweeps=args.max_sweeps)
-    test_version = f'{args.version}-test'
+    #2.准备评测的数据
+    test_version = f'{args.version}-test'#字符串拼接
     nuscenes_data_prep(
         root_path=args.root_path,
         can_bus_root_path=args.canbus,
