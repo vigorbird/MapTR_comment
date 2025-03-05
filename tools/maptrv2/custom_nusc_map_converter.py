@@ -175,12 +175,13 @@ def _get_can_bus_info(nusc, nusc_can_bus, sample):
     return np.array(can_bus)
 
 
+#指定sensor类型，计算指定sensor到lidar的外参
 def obtain_sensor2top(nusc,
                       sensor_token,
-                      l2e_t,
-                      l2e_r_mat,
-                      e2g_t,
-                      e2g_r_mat,
+                      l2e_t,#激光到车体系的外参 t_vj_lidar
+                      l2e_r_mat,#激光到车体系的外参 R_lidar_vj
+                      e2g_t,#车体系在全局坐标系下的位姿 t_vj_w
+                      e2g_r_mat,#车体系在全局坐标系下的位姿 R_vj_w
                       sensor_type='lidar'):
     """Obtain the info with RT matric from general sensor to Top LiDAR.
 
@@ -199,35 +200,44 @@ def obtain_sensor2top(nusc,
     Returns:
         sweep (dict): Sweep information after transformation.
     """
+    #1.获取指定传感器的标定信息（cs_record）
     sd_rec = nusc.get('sample_data', sensor_token)
     cs_record = nusc.get('calibrated_sensor',
                          sd_rec['calibrated_sensor_token'])
+    #2.获取传感器某个时刻的绝对位姿
     pose_record = nusc.get('ego_pose', sd_rec['ego_pose_token'])
     data_path = str(nusc.get_sample_data_path(sd_rec['token']))
     if os.getcwd() in data_path:  # path from lyftdataset is absolute path
+        #例如，如果当前工作目录是 /home/user/project，而 data_path 是 /home/user/project/data/file.txt，
+        # 那么经过这行代码后，data_path 将变成 data/file.txt。
         data_path = data_path.split(f'{os.getcwd()}/')[-1]  # relative path
     sweep = {
         'data_path': data_path,
         'type': sensor_type,
-        'sample_data_token': sd_rec['token'],
-        'sensor2ego_translation': cs_record['translation'],
-        'sensor2ego_rotation': cs_record['rotation'],
-        'ego2global_translation': pose_record['translation'],
-        'ego2global_rotation': pose_record['rotation'],
+        'sample_data_token': sd_rec['token'],#指定传感器的数据token索引
+        'sensor2ego_translation': cs_record['translation'],#传感器到车体系的外参信息
+        'sensor2ego_rotation': cs_record['rotation'],#传感器到车体系的外参信息
+        'ego2global_translation': pose_record['translation'],#车辆绝对位姿
+        'ego2global_rotation': pose_record['rotation'],#车辆绝对位姿
         'timestamp': sd_rec['timestamp']
     }
 
-    l2e_r_s = sweep['sensor2ego_rotation']
-    l2e_t_s = sweep['sensor2ego_translation']
-    e2g_r_s = sweep['ego2global_rotation']
-    e2g_t_s = sweep['ego2global_translation']
+    l2e_r_s = sweep['sensor2ego_rotation']#传感器到车体系的外参信息
+    l2e_t_s = sweep['sensor2ego_translation']#传感器到车体系的外参信息
+    e2g_r_s = sweep['ego2global_rotation'],#车辆绝对位姿
+    e2g_t_s = sweep['ego2global_translation'],#车辆绝对位姿
 
     # obtain the RT from sensor to Top LiDAR
     # sweep->ego->global->ego'->lidar
-    l2e_r_s_mat = Quaternion(l2e_r_s).rotation_matrix
-    e2g_r_s_mat = Quaternion(e2g_r_s).rotation_matrix
+    #R_vi_s(s表示sensor v表示车辆坐标系)  = l2e_r_s_mat
+    #R_w_vi(v表示车辆坐标系，w表示世界坐标系) = e2g_r_s_mat
+    l2e_r_s_mat = Quaternion(l2e_r_s).rotation_matrix#传感器外参信息
+    e2g_r_s_mat = Quaternion(e2g_r_s).rotation_matrix#车辆绝对位姿
+
+    #R_s_vi*R_vi_w*(R_w_vj*R_vj_lidar) = R_s_w*R_w_lidar = R_s_lidar
     R = (l2e_r_s_mat.T @ e2g_r_s_mat.T) @ (
         np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T)
+    # T =
     T = (l2e_t_s @ e2g_r_s_mat.T + e2g_t_s) @ (
         np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T)
     T -= e2g_t @ (np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T
@@ -237,13 +247,14 @@ def obtain_sensor2top(nusc,
     return sweep
 
 
-def _fill_trainval_infos(nusc,
-                         nusc_can_bus,
-                         nusc_maps, 
+#非常重要的函数！！！！
+def _fill_trainval_infos(nusc,#输入的类型是nuscene api 的类
+                         nusc_can_bus,#输入的类型是nuscene api 的类
+                         nusc_maps, #输入的类型是nuscene api 的类
                          map_explorer,
-                         train_scenes,
-                         val_scenes,
-                         test=False,
+                         train_scenes,#可用于训练的场景的token
+                         val_scenes,#可用于评测的场景的token
+                         test=False,#是否当前的任务是否用来评测，而不是训练
                          max_sweeps=10,
                          point_cloud_range=[-15.0, -30.0,-10.0, 15.0, 30.0, 10.0]):
     """Generate the train/val infos from the raw data.
@@ -263,19 +274,42 @@ def _fill_trainval_infos(nusc,
     train_nusc_infos = []
     val_nusc_infos = []
     frame_idx = 0
+    #用到了mmcv，track_iter_progress用于显示进度条
+    #遍历所有的sample，
+    # sample：一个2Hz的带注释的关键帧，也就是从一个scene中提取出的一帧。包含时间戳、对应的scene_token、下一个sample和上一个sample的token。
     for sample in mmcv.track_iter_progress(nusc.sample):
-        map_location = nusc.get('log', nusc.get('scene', sample['scene_token'])['log_token'])['location']
-
+        #1.获取这个sample在哪个位置被采集的(map_location)
+        # 这个sample是属于哪个scene的，把所属scene的token拿到
+        # 根据scene的token获取对应的scene数据对象
+        # 然后scene数据对象中拿到log_token数据
+        # 根据logtoken获取对应的log数据对象
+        # 然后提取log数据对象中的location字段
+        map_location = nusc.get('log', nusc.get('scene', sample['scene_token'])['log_token'] )['location']
+        #2.根据这个sample获取lidar的数据对象(sd_rec)，并在lidar数据对像中提取标定参数(cs-record)
         lidar_token = sample['data']['LIDAR_TOP']
         sd_rec = nusc.get('sample_data', sample['data']['LIDAR_TOP'])
         cs_record = nusc.get('calibrated_sensor',
                              sd_rec['calibrated_sensor_token'])
+        #3.获取lidar数据对象(sd_rec)中的ego_pose（pose_record）
         pose_record = nusc.get('ego_pose', sd_rec['ego_pose_token'])
+        #4.根据lidar的token，获取所有的激光和标定结果
+        # boxes_后面没有使用
         lidar_path, boxes, _ = nusc.get_sample_data(lidar_token)
 
-        mmcv.check_file_exist(lidar_path)
+        mmcv.check_file_exist(lidar_path)#使用到了mmcv数据结构！！！！！
+
+        #5.获取这个sample中的所有canbus相关信息
         can_bus = _get_can_bus_info(nusc, nusc_can_bus, sample)
-        ##
+
+        #6.将之前提取到的所有信息全部重新组合形成info数据结构
+        #info数据结构包括：当前sampl的lidar激光读取路径，
+        #                canbus原始数据，
+        #                sample在scene中的序号，
+        #                采集数据的城市位置，
+        #                sample对应的场景token
+        #                激光到车体系的外参
+        #                车体系的全局位姿
+        #                sample的时间戳
         info = {
             'lidar_path': lidar_path,
             'token': sample['token'],
@@ -287,10 +321,10 @@ def _fill_trainval_infos(nusc,
             'cams': dict(),
             'map_location': map_location,
             'scene_token': sample['scene_token'],  # temporal related info
-            'lidar2ego_translation': cs_record['translation'],
-            'lidar2ego_rotation': cs_record['rotation'],
-            'ego2global_translation': pose_record['translation'],
-            'ego2global_rotation': pose_record['rotation'],
+            'lidar2ego_translation': cs_record['translation'],#激光到车体系的外参
+            'lidar2ego_rotation': cs_record['rotation'],#激光到车体系的外参
+            'ego2global_translation': pose_record['translation'],#车体系在全局坐标系下的位姿
+            'ego2global_rotation': pose_record['rotation'],#车体系在全局坐标系下的位姿
             'timestamp': sample['timestamp'],
         }
 
@@ -299,13 +333,14 @@ def _fill_trainval_infos(nusc,
         else:
             frame_idx += 1
 
-        l2e_r = info['lidar2ego_rotation']
-        l2e_t = info['lidar2ego_translation']
-        e2g_r = info['ego2global_rotation']
-        e2g_t = info['ego2global_translation']
-        l2e_r_mat = Quaternion(l2e_r).rotation_matrix
-        e2g_r_mat = Quaternion(e2g_r).rotation_matrix
+        l2e_r = info['lidar2ego_rotation']#激光到车体系的外参
+        l2e_t = info['lidar2ego_translation']#激光到车体系的外参
+        e2g_r = info['ego2global_rotation']#车体系在全局坐标系下的位姿
+        e2g_t = info['ego2global_translation']#车体系在全局坐标系下的位姿
+        l2e_r_mat = Quaternion(l2e_r).rotation_matrix#激光到车体系的外参
+        e2g_r_mat = Quaternion(e2g_r).rotation_matrix#激光到车体系的外参
 
+        #7. 更新info中的相机的内外参数
         # obtain 6 image's information per frame
         camera_types = [
             'CAM_FRONT',
@@ -315,15 +350,41 @@ def _fill_trainval_infos(nusc,
             'CAM_BACK_LEFT',
             'CAM_BACK_RIGHT',
         ]
+        # info数据结构包括：当前sampl的lidar激光读取路径，
+        #                canbus原始数据，
+        #                sample在scene中的序号，
+        #                采集数据的城市位置，
+        #                sample对应的场景token
+        #                激光到车体系的外参
+        #                车体系的全局位姿
+        #                sample的时间戳
+        # 经过下面的函数新增了如下字段：
+        #                各个相机的内参
+        #                各个相机到lidar的外参
         for cam in camera_types:
             cam_token = sample['data'][cam]
             cam_path, _, cam_intrinsic = nusc.get_sample_data(cam_token)
+            #cam_info是一个字典数据结构，这个函数的作用是更新lidar到cam的外参信息，方便后续使用
             cam_info = obtain_sensor2top(nusc, cam_token, l2e_t, l2e_r_mat,
-                                         e2g_t, e2g_r_mat, cam)
+                                         e2g_t, e2g_r_mat, cam)#待细化的函数！！！！！！
             cam_info.update(cam_intrinsic=cam_intrinsic)
             info['cams'].update({cam: cam_info})
 
+        #8.从当前样本中获取 LiDAR 数据,递归地获取 前序帧 的LiDAR数据，直到达到指定的最大帧数（max_sweeps）
+        # 当前帧到前面10帧 LiDAR 的相对位姿, 并将这个相对位姿存储到 sweeps 列表中。
         # obtain sweeps for a single key-frame
+        # info数据结构包括：当前sampl的lidar激光读取路径，
+        #                canbus原始数据，
+        #                sample在scene中的序号，
+        #                采集数据的城市位置，
+        #                sample对应的场景token
+        #                激光到车体系的外参
+        #                车体系的全局位姿
+        #                sample的时间戳
+        #                各个相机的内参
+        #                各个相机到lidar的外参
+        # 经过下面的函数新增了如下字段：
+        #                当前sample前十帧的lidar相对位姿
         sd_rec = nusc.get('sample_data', sample['data']['LIDAR_TOP'])
         sweeps = []
         while len(sweeps) < max_sweeps:
@@ -335,8 +396,25 @@ def _fill_trainval_infos(nusc,
             else:
                 break
         info['sweeps'] = sweeps
+
         # obtain annotation
         # import ipdb;ipdb.set_trace()
+        #9.更新info中的annotation字段信息
+        #非常重要的函数！！！！！！！！！
+        #point_cloud_range=[-15.0, -30.0,-10.0, 15.0, 30.0, 10.0])
+        # info数据结构包括：当前sampl的lidar激光读取路径，
+        #                canbus原始数据，
+        #                sample在scene中的序号，
+        #                采集数据的城市位置，
+        #                sample对应的场景token
+        #                激光到车体系的外参
+        #                车体系的全局位姿
+        #                sample的时间戳
+        #                各个相机的内参
+        #                各个相机到lidar的外参
+        #                当前sample前十帧的lidar相对位姿
+        # 经过下面的函数新增了如下字段：
+        #
         info = obtain_vectormap(nusc_maps, map_explorer, info, point_cloud_range)
 
         if sample['scene_token'] in train_scenes:
@@ -346,28 +424,39 @@ def _fill_trainval_infos(nusc,
 
     return train_nusc_infos, val_nusc_infos
 
+#point_cloud_range=[-15.0, -30.0,-10.0, 15.0, 30.0, 10.0]、
+#这个函数的主要作用是根据绝对位姿，从地图中crop下来一块地图，crop范围大小由point_cloud_range决定
 def obtain_vectormap(nusc_maps, map_explorer, info, point_cloud_range):
     # import ipdb;ipdb.set_trace()
+    #1.获取lidar外参（lidar2ego）
     lidar2ego = np.eye(4)
     lidar2ego[:3,:3] = Quaternion(info['lidar2ego_rotation']).rotation_matrix
     lidar2ego[:3, 3] = info['lidar2ego_translation']
+
+    #2.获取全局位姿（ego2global）
     ego2global = np.eye(4)
     ego2global[:3,:3] = Quaternion(info['ego2global_rotation']).rotation_matrix
     ego2global[:3, 3] = info['ego2global_translation']
 
+    #3.获取lidar在全局坐标系下的位姿（lidar2global_translation，lidar2global_rotation）
     lidar2global = ego2global @ lidar2ego
-
     lidar2global_translation = list(lidar2global[:3,3])
     lidar2global_rotation = list(Quaternion(matrix=lidar2global).q)
 
     location = info['map_location']
+    #下面这两个变量没有使用
     ego2global_translation = info['ego2global_translation']
     ego2global_rotation = info['ego2global_rotation']
 
-    patch_h = point_cloud_range[4]-point_cloud_range[1]
-    patch_w = point_cloud_range[3]-point_cloud_range[0]
+    # point_cloud_range = [-15.0, -30.0,-10.0, 15.0, 30.0, 10.0]
+    #4. 关于这个参数详见算法实现文档，获取crop的大小
+    patch_h = point_cloud_range[4]-point_cloud_range[1]#30+30
+    patch_w = point_cloud_range[3]-point_cloud_range[0]#15+15
     patch_size = (patch_h, patch_w)
+
+    #5.核心函数，开始crop地图！！！！
     vector_map = VectorizedLocalMap(nusc_maps[location], map_explorer[location],patch_size)
+    #地图中包括如下的元素：divider，ped_crossing，boundary，enterline
     map_anns = vector_map.gen_vectorized_samples(lidar2global_translation, lidar2global_rotation)
     # import ipdb;ipdb.set_trace()
     info["annotation"] = map_anns
@@ -403,7 +492,7 @@ class VectorizedLocalMap(object):
         self.centerline_classes = centerline_classes
         self.patch_size = patch_size
 
-
+    #
     def gen_vectorized_samples(self, lidar2global_translation, lidar2global_rotation):
         '''
         use lidar2global to get gt map layers
@@ -446,6 +535,7 @@ class VectorizedLocalMap(object):
                 raise ValueError(f'WRONG vec_class: {vec_class}')
         # import ipdb;ipdb.set_trace()
         return map_dict
+
     def get_centerline_geom(self, patch_box, patch_angle, layer_names):
         map_geom = {}
         for layer_name in layer_names:
@@ -841,7 +931,7 @@ def create_nuscenes_infos(root_path,
         print('train scene: {}, val scene: {}'.format(
             len(train_scenes), len(val_scenes)))
 
-    #6.提取可用的场景，转换成作者自己定义的数据类型！！！！！
+    #6.提取可用的场景，转换成作者自己定义的数据类型！！！！！！！！！！！！！！！！！！！！
     #非常重要的函数！！！！！
     train_nusc_infos, val_nusc_infos = _fill_trainval_infos(
         nusc, nusc_can_bus, nusc_maps, map_explorer, train_scenes, val_scenes, test, max_sweeps=max_sweeps)
